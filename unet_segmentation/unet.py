@@ -3,6 +3,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 from do_conv import DOConv2d
 from aspp import _ASPP
+from convlstm import ConvLSTM
 
 # 基本卷积块
 class Conv(nn.Module):
@@ -12,12 +13,10 @@ class Conv(nn.Module):
 
             nn.Conv2d(C_in, C_out, 3, 1, 1),
             nn.BatchNorm2d(C_out),
-            nn.Dropout(0.1),
             nn.ReLU(),
 
             nn.Conv2d(C_out, C_out, 3, 1, 1),
             nn.BatchNorm2d(C_out),
-            nn.Dropout(0.1),
             nn.ReLU(),
         )
 
@@ -31,12 +30,10 @@ class DOConv(nn.Module):
             
             DOConv2d(C_in, C_out, 3, 9, 1, 1),
             nn.BatchNorm2d(C_out),
-            nn.Dropout(0.1),
             nn.ReLU(),
             
             DOConv2d(C_out, C_out, 3, 9, 1, 1),
             nn.BatchNorm2d(C_out),
-            nn.Dropout(0.1),
             nn.ReLU(),
         )
     
@@ -79,7 +76,7 @@ class UNet(nn.Module):
         super(UNet, self).__init__()
 
         # 4次下采样
-        self.C1 = Conv(3, 64)
+        self.C1 = Conv(1, 64)
         self.D1 = DownSampling(64)
         self.C2 = Conv(64, 128)
         self.D2 = DownSampling(128)
@@ -91,14 +88,19 @@ class UNet(nn.Module):
 
         # 4次上采样
         self.U1 = UpSampling(1024)
-        self.C5 = Conv(1024, 512)
+        self.C5 = DOConv(1024, 512)
         self.U2 = UpSampling(512)
-        self.C6 = Conv(512, 256)
+        self.C6 = DOConv(512, 256)
         self.U3 = UpSampling(256)
-        self.C7 = Conv(256, 128)
+        self.C7 = DOConv(256, 128)
         self.U4 = UpSampling(128)
-        self.C8 = Conv(128, 64)
-
+        self.C8 = DOConv(128, 64)
+        
+        self.convlstm_R4 = ConvLSTM(512, 16, (3, 3), 1, True, True, False)
+        self.convlstm_R3 = ConvLSTM(256, 16, (3, 3), 1, True, True, False)
+        self.convlstm_R2 = ConvLSTM(128, 16, (3, 3), 1, True, True, False)
+        
+        
         self.Th = nn.Sigmoid()
         self.pred = DOConv2d(64, 3, 3, 9, 1, 1)
 
@@ -109,7 +111,16 @@ class UNet(nn.Module):
         R3 = self.C3(self.D2(R2))
         R4 = self.C4(self.D3(R3))
         Y1 = self.aspp(self.D4(R4))
-
+        
+        # 拼接部分
+        input_R4 = R4.unsqueeze(1).expand(-1, 10, -1, -1, -1)
+        self.convlstm_R4(input_R4)
+        
+        input_R3 = R3.unsqueeze(1).expand(-1, 10, -1, -1, -1)
+        self.convlstm_R3(input_R3)
+        
+        input_R2 = R2.unsqueeze(1).expand(-1, 10, -1, -1, -1)
+        self.convlstm_R2(input_R2)
         # 上采样部分
         # 上采样的时候需要拼接起来
         O1 = self.C5(self.U1(Y1, R4))
